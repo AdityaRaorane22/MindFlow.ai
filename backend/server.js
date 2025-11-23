@@ -19,6 +19,11 @@ const UserSchema = new mongoose.Schema({
   name: String,
   email: { type: String, unique: true },
   password: String,
+  flowScore: Number,
+  coins: Number,
+  level: Number,
+  streak: Number,
+  totalTime: Number,
 });
 
 const User = mongoose.model("User", UserSchema);
@@ -62,6 +67,17 @@ app.post("/api/auth/login", async (req, res) => {
     });
   } catch (e) {
     return res.status(500).json({ msg: "Server error" });
+  }
+});
+
+// GET LOGGED USER DETAILS
+app.get("/user/:id", async (req, res) => {
+  try {
+    let user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ msg: "User not found" });
+    res.json(user);
+  } catch (err) {
+    res.status(500).send("Server Error");
   }
 });
 
