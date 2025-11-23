@@ -1,6 +1,6 @@
 """
-LSTM + Attention Model for Real-Time Focus State Detection
-Based on research: 83.5% F1 score for cognitive state detection
+IMPROVED LSTM + Attention Model for Real-Time Focus State Detection
+Fixes: Lambda layer shape issue + improved training
 """
 
 import numpy as np
@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import classification_report, confusion_matrix
 import json
+
+print("TensorFlow version:", tf.__version__)
 
 # Load data
 print("Loading data...")
@@ -53,47 +55,66 @@ X_train, X_test, y_train, y_test = train_test_split(
     X_seq, y_seq, test_size=0.2, random_state=42, stratify=y_seq
 )
 
-# Build LSTM + Attention Model
-def attention_layer(inputs):
-    """Attention mechanism for LSTM"""
-    attention = layers.Dense(1, activation='tanh')(inputs)
-    attention = layers.Flatten()(attention)
-    attention = layers.Activation('softmax')(attention)
-    attention = layers.RepeatVector(inputs.shape[-1])(attention)
-    attention = layers.Permute([2, 1])(attention)
-    
-    output = layers.Multiply()([inputs, attention])
-    output = layers.Lambda(lambda x: tf.reduce_sum(x, axis=1))(output)
-    return output
+print(f"Training samples: {len(X_train)}")
+print(f"Test samples: {len(X_test)}")
 
-def build_lstm_attention_model(input_shape, num_classes=3):
+# Build IMPROVED LSTM Model with proper Lambda layer
+def build_improved_lstm_model(input_shape, num_classes=3):
     """
-    LSTM + Attention model for focus state detection
-    Architecture based on research achieving 83.5% accuracy
+    Improved LSTM model with fixed Lambda layer and better architecture
     """
     inputs = keras.Input(shape=input_shape)
     
-    # LSTM layers with dropout
-    lstm1 = layers.LSTM(128, return_sequences=True, dropout=0.3)(inputs)
-    lstm2 = layers.LSTM(64, return_sequences=True, dropout=0.3)(lstm1)
+    # First LSTM layer
+    lstm1 = layers.LSTM(128, return_sequences=True, dropout=0.3, 
+                       recurrent_dropout=0.2)(inputs)
+    lstm1 = layers.BatchNormalization()(lstm1)
     
-    # Attention mechanism
-    attention_output = attention_layer(lstm2)
+    # Second LSTM layer
+    lstm2 = layers.LSTM(64, return_sequences=True, dropout=0.3,
+                       recurrent_dropout=0.2)(lstm1)
+    lstm2 = layers.BatchNormalization()(lstm2)
+    
+    # Attention mechanism with FIXED Lambda layer
+    attention = layers.Dense(1, activation='tanh')(lstm2)
+    attention = layers.Flatten()(attention)
+    attention = layers.Activation('softmax')(attention)
+    attention = layers.RepeatVector(64)(attention)
+    attention = layers.Permute([2, 1])(attention)
+    
+    # Apply attention
+    attended = layers.Multiply()([lstm2, attention])
+    
+    # FIX: Use explicit output_shape in Lambda layer
+    attended = layers.Lambda(
+        lambda x: tf.reduce_sum(x, axis=1),
+        output_shape=(64,),
+        name='attention_sum'
+    )(attended)
     
     # Dense layers
-    dense1 = layers.Dense(64, activation='relu')(attention_output)
-    dense1 = layers.Dropout(0.3)(dense1)
-    dense2 = layers.Dense(32, activation='relu')(dense1)
+    dense1 = layers.Dense(128, activation='relu')(attended)
+    dense1 = layers.Dropout(0.4)(dense1)
+    dense1 = layers.BatchNormalization()(dense1)
+    
+    dense2 = layers.Dense(64, activation='relu')(dense1)
+    dense2 = layers.Dropout(0.3)(dense2)
     
     # Output layer
     outputs = layers.Dense(num_classes, activation='softmax')(dense2)
     
-    model = keras.Model(inputs=inputs, outputs=outputs)
+    model = keras.Model(inputs=inputs, outputs=outputs, name='FocusDetectionLSTM')
     return model
 
 # Create model
 print("\nBuilding LSTM + Attention model...")
-model = build_lstm_attention_model((time_steps, X_train.shape[2]))
+model = build_improved_lstm_model((time_steps, X_train.shape[2]))
+
+# Use class weights to handle imbalance
+from sklearn.utils.class_weight import compute_class_weight
+class_weights_array = compute_class_weight('balanced', classes=np.unique(y_train), y=y_train)
+class_weights = {i: weight for i, weight in enumerate(class_weights_array)}
+print(f"Class weights: {class_weights}")
 
 model.compile(
     optimizer=keras.optimizers.Adam(learning_rate=0.001),
@@ -105,11 +126,25 @@ print(model.summary())
 
 # Callbacks
 early_stop = keras.callbacks.EarlyStopping(
-    monitor='val_loss', patience=10, restore_best_weights=True
+    monitor='val_loss', 
+    patience=15, 
+    restore_best_weights=True,
+    verbose=1
 )
 
 reduce_lr = keras.callbacks.ReduceLROnPlateau(
-    monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001
+    monitor='val_loss', 
+    factor=0.5, 
+    patience=7, 
+    min_lr=0.00001,
+    verbose=1
+)
+
+checkpoint = keras.callbacks.ModelCheckpoint(
+    'best_model.keras',
+    monitor='val_accuracy',
+    save_best_only=True,
+    verbose=1
 )
 
 # Train model
@@ -117,9 +152,10 @@ print("\nTraining model...")
 history = model.fit(
     X_train, y_train,
     validation_split=0.2,
-    epochs=50,
+    epochs=100,
     batch_size=32,
-    callbacks=[early_stop, reduce_lr],
+    class_weight=class_weights,
+    callbacks=[early_stop, reduce_lr, checkpoint],
     verbose=1
 )
 
@@ -127,6 +163,7 @@ history = model.fit(
 print("\nEvaluating model...")
 test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
 print(f"Test Accuracy: {test_acc*100:.2f}%")
+print(f"Test Loss: {test_loss:.4f}")
 
 # Predictions
 y_pred = model.predict(X_test)
@@ -135,45 +172,50 @@ y_pred_classes = np.argmax(y_pred, axis=1)
 # Classification report
 print("\nClassification Report:")
 print(classification_report(y_test, y_pred_classes, 
-                          target_names=['Distracted', 'Focused', 'Deep Flow']))
+                          target_names=['Distracted', 'Focused', 'Deep Flow'],
+                          zero_division=0))
 
 # Confusion matrix
 cm = confusion_matrix(y_test, y_pred_classes)
-plt.figure(figsize=(8, 6))
+plt.figure(figsize=(10, 8))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
             xticklabels=['Distracted', 'Focused', 'Deep Flow'],
             yticklabels=['Distracted', 'Focused', 'Deep Flow'])
-plt.title('Confusion Matrix - Focus State Detection')
-plt.ylabel('True Label')
-plt.xlabel('Predicted Label')
+plt.title('Confusion Matrix - Focus State Detection', fontsize=16, fontweight='bold')
+plt.ylabel('True Label', fontsize=12)
+plt.xlabel('Predicted Label', fontsize=12)
 plt.tight_layout()
-plt.savefig('confusion_matrix.png')
+plt.savefig('confusion_matrix.png', dpi=300)
 print("✓ Saved confusion matrix to confusion_matrix.png")
 
 # Plot training history
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-ax1.plot(history.history['loss'], label='Train Loss')
-ax1.plot(history.history['val_loss'], label='Val Loss')
-ax1.set_title('Model Loss')
-ax1.set_xlabel('Epoch')
-ax1.set_ylabel('Loss')
-ax1.legend()
-ax1.grid(True)
+ax1.plot(history.history['loss'], label='Train Loss', linewidth=2)
+ax1.plot(history.history['val_loss'], label='Val Loss', linewidth=2)
+ax1.set_title('Model Loss', fontsize=14, fontweight='bold')
+ax1.set_xlabel('Epoch', fontsize=12)
+ax1.set_ylabel('Loss', fontsize=12)
+ax1.legend(fontsize=10)
+ax1.grid(True, alpha=0.3)
 
-ax2.plot(history.history['accuracy'], label='Train Accuracy')
-ax2.plot(history.history['val_accuracy'], label='Val Accuracy')
-ax2.set_title('Model Accuracy')
-ax2.set_xlabel('Epoch')
-ax2.set_ylabel('Accuracy')
-ax2.legend()
-ax2.grid(True)
+ax2.plot(history.history['accuracy'], label='Train Accuracy', linewidth=2)
+ax2.plot(history.history['val_accuracy'], label='Val Accuracy', linewidth=2)
+ax2.set_title('Model Accuracy', fontsize=14, fontweight='bold')
+ax2.set_xlabel('Epoch', fontsize=12)
+ax2.set_ylabel('Accuracy', fontsize=12)
+ax2.legend(fontsize=10)
+ax2.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('training_history.png')
+plt.savefig('training_history.png', dpi=300)
 print("✓ Saved training history to training_history.png")
 
-# Save model
+# Save model in Keras format (recommended)
+model.save('focus_detection_lstm_model.keras')
+print("✓ Saved model to focus_detection_lstm_model.keras")
+
+# Also save in H5 format for compatibility
 model.save('focus_detection_lstm_model.h5')
 print("✓ Saved model to focus_detection_lstm_model.h5")
 
@@ -192,17 +234,7 @@ print("✓ Saved scaler parameters to scaler_params.json")
 def predict_focus_state(model, scaler, features, history_buffer):
     """
     Real-time focus state prediction
-    
-    Args:
-        model: Trained LSTM model
-        scaler: Fitted StandardScaler
-        features: Current feature values (dict)
-        history_buffer: List of past 10 feature vectors
-    
-    Returns:
-        prediction: {state: str, confidence: float, flow_score: int}
     """
-    # Convert features to array
     feature_vector = np.array([
         features['eye_fixation_duration_ms'],
         features['eye_saccade_velocity'],
@@ -253,34 +285,55 @@ def predict_focus_state(model, scaler, features, history_buffer):
         }
     }
 
-# Test prediction
+# Test prediction with different scenarios
 print("\n" + "="*60)
 print("Testing Real-Time Prediction:")
 print("="*60)
 
+# Test 1: Deep Flow scenario
+print("\n[Test 1] Deep Flow Scenario:")
 history_buffer = []
 test_features = {
-    'eye_fixation_duration_ms': 450,
-    'eye_saccade_velocity': 120,
-    'eye_blink_rate': 8,
-    'mouse_movements_per_min': 5,
-    'mouse_idle_time_sec': 25,
-    'keyboard_strokes_per_min': 95,
-    'keyboard_burst_pattern': 0.85,
-    'tab_switches_per_min': 1,
-    'scroll_speed_px_per_sec': 50,
-    'time_on_task_min': 35
+    'eye_fixation_duration_ms': 600,
+    'eye_saccade_velocity': 80,
+    'eye_blink_rate': 7,
+    'mouse_movements_per_min': 3,
+    'mouse_idle_time_sec': 35,
+    'keyboard_strokes_per_min': 110,
+    'keyboard_burst_pattern': 0.88,
+    'tab_switches_per_min': 0,
+    'scroll_speed_px_per_sec': 40,
+    'time_on_task_min': 45
 }
 
-# Simulate 10 timesteps
 for i in range(12):
     result = predict_focus_state(model, scaler, test_features, history_buffer)
-    if i >= 9:  # After warmup
-        print(f"\nTimestep {i+1}:")
-        print(f"  State: {result['state']}")
-        print(f"  Confidence: {result['confidence']}%")
-        print(f"  Flow Score: {result['flow_score']}/100")
-        print(f"  Probabilities: {result['probabilities']}")
+    if i >= 9:
+        print(f"  Timestep {i+1}: {result['state']} | Score: {result['flow_score']}/100 | Conf: {result['confidence']}%")
 
-print("\n✓ Model training complete!")
+# Test 2: Distracted scenario
+print("\n[Test 2] Distracted Scenario:")
+history_buffer = []
+test_features = {
+    'eye_fixation_duration_ms': 120,
+    'eye_saccade_velocity': 450,
+    'eye_blink_rate': 32,
+    'mouse_movements_per_min': 75,
+    'mouse_idle_time_sec': 1.5,
+    'keyboard_strokes_per_min': 15,
+    'keyboard_burst_pattern': 0.2,
+    'tab_switches_per_min': 12,
+    'scroll_speed_px_per_sec': 600,
+    'time_on_task_min': 2
+}
+
+for i in range(12):
+    result = predict_focus_state(model, scaler, test_features, history_buffer)
+    if i >= 9:
+        print(f"  Timestep {i+1}: {result['state']} | Score: {result['flow_score']}/100 | Conf: {result['confidence']}%")
+
+print("\n" + "="*60)
+print("✓ Model training complete!")
 print(f"✓ Final Test Accuracy: {test_acc*100:.2f}%")
+print(f"✓ Model saved in both .keras and .h5 formats")
+print("="*60)

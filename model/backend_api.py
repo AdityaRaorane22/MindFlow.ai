@@ -19,7 +19,32 @@ CORS(app)
 
 # Load model and scaler
 print("Loading LSTM model...")
-model = keras.models.load_model('focus_detection_lstm_model.h5')
+# Try loading .keras format first (recommended), fall back to .h5
+try:
+    model = keras.models.load_model('focus_detection_lstm_model.keras')
+    print("✓ Loaded model from .keras format")
+except:
+    try:
+        # Define custom objects for Lambda layer
+        custom_objects = {
+            'Lambda': layers.Lambda,
+            'attention_sum': layers.Lambda(
+                lambda x: tf.reduce_sum(x, axis=1),
+                output_shape=(64,)
+            )
+        }
+        model = keras.models.load_model('focus_detection_lstm_model.h5', 
+                                       custom_objects=custom_objects,
+                                       compile=False)
+        model.compile(
+            optimizer='adam',
+            loss='sparse_categorical_crossentropy',
+            metrics=['accuracy']
+        )
+        print("✓ Loaded model from .h5 format")
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        raise
 
 print("Loading scaler parameters...")
 with open('scaler_params.json', 'r') as f:
